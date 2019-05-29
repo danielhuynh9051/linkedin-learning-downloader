@@ -23,9 +23,10 @@ FILE_TYPE_VIDEO = ".mp4"
 FILE_TYPE_SUBTITLE = ".srt"
 COOKIE_JAR = aiohttp.cookiejar.CookieJar()
 
-Course = namedtuple("Course", ["name", "slug", "description", "unlocked", "chapters"])
+Course = namedtuple("Course", ["name", "slug", "description", "unlocked", "chapters", "exercises"])
 Chapter = namedtuple("Chapter", ["name", "videos", "index"])
 Video = namedtuple("Video", ["name", "slug", "index", "filename"])
+Exercise = namedtuple("Exercise", ["name", "url", "index"])
 
 
 def sub_format_time(ms):
@@ -57,11 +58,20 @@ def build_course(course_element: dict):
                 index=idx)
         for idx, course in enumerate(course_element['chapters'], start=1)
     ]
+    exercises = [
+        Exercise(
+            name=exc['name'],
+            url=exc['url'],
+            index=idx
+        )
+        for idx, exc in enumerate(course_element['exerciseFiles'], start=1)
+    ]
     course = Course(name=course_element['title'],
                     slug=course_element['slug'],
                     description=course_element['description'],
                     unlocked=course_element['fullCourseUnlocked'],
-                    chapters=chapters)
+                    chapters=chapters,
+                    exercises=exercises)
     return course
 
 
@@ -112,13 +122,32 @@ async def fetch_course(course_slug):
         course = build_course(data['elements'][0])
 
         logging.info(f'[*] Access to {course.name} is {"GRANTED" if course.unlocked else "DENIED"}')
-        if not course.unlocked:
-            # Nothing to do here
-            return
-
+        # if not course.unlocked:
+        #     # Nothing to do here
+        #     return
+        await fetch_exercise(course)
         await fetch_chapters(course)
         logging.info(f'[*] Finished  fetching course "{course.name}"')
 
+
+async def fetch_exercise(course: Course):
+    logging.info(f'Fetching Exercises...')
+
+    if not course.exercises:
+        return
+
+    exerciseDir =  os.path.join(BASE_DOWNLOAD_PATH, clean_dir_name(course.name), "Exercise")
+
+    if not os.path.exists(exerciseDir):
+        os.makedirs(exerciseDir)
+
+    for exercise in course.exercises:
+        exerciseFilename = os.path.join(exerciseDir, exercise.name)
+
+        if not os.path.exists(exerciseFilename):
+            logging.info(f'--Downloading Exercise {exerciseFilename}...')
+            await download_file(exercise.url, exerciseFilename)
+            logging.info(f'----Downloaded Exercise {exerciseFilename}!')
 
 async def fetch_chapters(course: Course):
     chapters_dirs = [chapter_dir(course, chapter) for chapter in course.chapters]
@@ -167,7 +196,10 @@ async def fetch_video(course: Course, chapter: Chapter, video: Video):
         duration_in_ms = int(data['elements'][0]['selectedVideo']['durationInSeconds']) * 1000
 
         if not video_exists:
+            logging.info(f'----Downloading {video_url} to {video_file_path}')
             await download_file(video_url, video_file_path)
+        else:
+            logging.info(f'--Video {video_file_path} existed!')
 
         await write_subtitles(subtitles, subtitle_file_path, duration_in_ms)
 
@@ -199,7 +231,7 @@ async def download_file(url, output):
                             break
                         f.write(chunk)
             except Exception as e:
-                logging.exception(f"[!] Error while downloading: '{e}'")
+                logging.exception(f"[!] Error while downloading {output}: '{e}'")
                 if os.path.exists(output):
                     os.remove(output)
 

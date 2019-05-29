@@ -4,6 +4,7 @@ import os
 USERNAME = '...'
 PASSWORD = '...'
 COURSES = [
+    # 'node-js-microservices',
 ]
 
 # EDIT IF YOU NEED TO

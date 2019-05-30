@@ -10,7 +10,6 @@ Dependencies:
 - lxml
 
 #### Info
-
 Please use this script for your own purposes.
 
 This script was written for educational usage only.
@@ -18,9 +17,13 @@ This script was written for educational usage only.
 Make sure your LinkedIn account is **NOT** protected with 2FA
 
 #### Usage
+Note: `Disable MAX_PATH limit when you use on windows`
+
+Install Dependencies:
+
 > pip install -r requirements.txt
 
-Edit config.py file (username, password and courses slugs)  
+Edit config.py file (username, password, paths and courses slugs):
 
 ```Course's slug can be obtained using its url
 e.g:

@@ -9,9 +9,10 @@ import logging
 from itertools import chain, filterfalse, starmap
 from collections import namedtuple
 from urllib.parse import urljoin
-from config import USERNAME, PASSWORD, COURSES, PROXY, BASE_DOWNLOAD_PATH
+from config import USERNAME, PASSWORD, MULTI_THREAD, PROXY, BASE_DOWNLOAD_PATH, PATHS
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
+logging.basicConfig(level=logging.DEBUG,
+                    format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
 
 
 HEADERS = {
@@ -23,7 +24,8 @@ FILE_TYPE_VIDEO = ".mp4"
 FILE_TYPE_SUBTITLE = ".srt"
 COOKIE_JAR = aiohttp.cookiejar.CookieJar()
 
-Course = namedtuple("Course", ["name", "slug", "description", "unlocked", "chapters", "exercises"])
+Course = namedtuple("Course", [
+                    "name", "slug", "description", "unlocked", "chapters", "exercises", "path"])
 Chapter = namedtuple("Chapter", ["name", "videos", "index"])
 Video = namedtuple("Video", ["name", "slug", "index", "filename"])
 Exercise = namedtuple("Exercise", ["name", "url", "index"])
@@ -44,19 +46,22 @@ def clean_dir_name(dir_name):
     return no_bad_chars.strip()
 
 
-def build_course(course_element: dict):
+def build_course(course_element: dict, path):
     chapters = [
-        Chapter(name=course['title'],
-                videos=[
-                    Video(name=video['title'],
-                          slug=video['slug'],
-                          index=idx,
-                          filename=f"{str(idx).zfill(2)} - {clean_dir_name(video['title'])}{FILE_TYPE_VIDEO}"
-                          )
-                    for idx, video in enumerate(course['videos'], start=1)
-                ],
-                index=idx)
-        for idx, course in enumerate(course_element['chapters'], start=1)
+        Chapter(
+            name=chapter['title'],
+            videos=[
+                Video(
+                    name=video['title'],
+                    slug=video['slug'],
+                    index=idx,
+                    filename=f"{str(idx).zfill(2)} - {clean_dir_name(video['title'])}{FILE_TYPE_VIDEO}"
+                )
+                for idx, video in enumerate(chapter['videos'], start=1)
+            ],
+            index=idx
+        )
+        for idx, chapter in enumerate(course_element['chapters'], start=1)
     ]
     exercises = [
         Exercise(
@@ -66,20 +71,21 @@ def build_course(course_element: dict):
         )
         for idx, exc in enumerate(course_element['exerciseFiles'], start=1)
     ]
-    course = Course(name=course_element['title'],
-                    slug=course_element['slug'],
-                    description=course_element['description'],
-                    unlocked=course_element['fullCourseUnlocked'],
-                    chapters=chapters,
-                    exercises=exercises)
+    course = Course(
+        name=course_element['title'],
+        slug=course_element['slug'],
+        description=course_element['description'],
+        unlocked=course_element['fullCourseUnlocked'],
+        chapters=chapters,
+        exercises=exercises,
+        path=path
+    )
     return course
-
 
 def chapter_dir(course: Course, chapter: Chapter):
     folder_name = f"{str(chapter.index).zfill(2)} - {clean_dir_name(chapter.name)}"
-    chapter_path = os.path.join(BASE_DOWNLOAD_PATH, clean_dir_name(course.name), folder_name)
+    chapter_path = os.path.join(course.path, folder_name)
     return chapter_path
-
 
 async def login(username, password):
     async with aiohttp.ClientSession(headers=HEADERS, cookie_jar=COOKIE_JAR) as session:
@@ -102,26 +108,49 @@ async def login(username, password):
         await session.post(urljoin(URL, 'uas/login-submit'), proxy=PROXY, data=data)
 
         if not next((x.value for x in session.cookie_jar if x.key.lower() == 'li_at'), False):
-            raise RuntimeError("[!] Could not login. Please check your credentials")
+            raise RuntimeError(
+                "[!] Could not login. Please check your credentials")
 
-        HEADERS['Csrf-Token'] = next(x.value for x in session.cookie_jar if x.key.lower() == 'jsessionid')
+        HEADERS['Csrf-Token'] = next(
+            x.value for x in session.cookie_jar if x.key.lower() == 'jsessionid')
         logging.info("[*] Login step 2 - Done")
 
 
-async def fetch_courses():
-    return await asyncio.gather(*map(fetch_course, COURSES))
+async def fetch_paths(paths):
+    for path in paths:
+        await fetch_path(path)
 
 
-async def fetch_course(course_slug):
-    url = f"{URL}/learning-api/detailedCourses??fields=fullCourseUnlocked,releasedOn,exerciseFileUrls,exerciseFiles&" \
-          f"addParagraphsToTranscript=true&courseSlug={course_slug}&q=slugs"
+async def fetch_path(path):
+    if MULTI_THREAD:
+        return await asyncio.gather(*[fetch_course(course, idx, path.name) for idx, course in enumerate(path.courses, start=1)])
+    else:
+        for idx, course in enumerate(path.courses, start=1):
+            await fetch_course(course, idx, path.name)
+
+# async def fetch_courses(courses):
+#     return await asyncio.gather(*map(fetch_course, courses))
+
+
+async def fetch_course(course_slug, index, pathName=None):
+    logging.info(
+        f"[*] -------------Fetching COURSE [{course_slug}]-------------")
+    url = f"{URL}/learning-api/detailedCourses??fields=fullCourseUnlocked,releasedOn,exerciseFileUrls,exerciseFiles&addParagraphsToTranscript=true&courseSlug={course_slug}&q=slugs"
 
     async with aiohttp.ClientSession(headers=HEADERS, cookie_jar=COOKIE_JAR) as session:
         resp = await session.get(url, proxy=PROXY, headers=HEADERS)
         data = await resp.json()
-        course = build_course(data['elements'][0])
 
-        logging.info(f'[*] Access to {course.name} is {"GRANTED" if course.unlocked else "DENIED"}')
+        if pathName is None:
+            path = os.path.join(BASE_DOWNLOAD_PATH, clean_dir_name(data['elements'][0]['title']))
+        else:
+            data['elements'][0]['title'] = f"{str(index).zfill(2)} - {data['elements'][0]['title']}"
+            path = os.path.join(BASE_DOWNLOAD_PATH, clean_dir_name(
+                pathName), clean_dir_name(data['elements'][0]['title']))
+
+        course = build_course(data['elements'][0], path)
+        logging.info(
+            f'[*] Access to {course.name} is {"GRANTED" if course.unlocked else "DENIED"}')
         # if not course.unlocked:
         #     # Nothing to do here
         #     return
@@ -136,7 +165,7 @@ async def fetch_exercise(course: Course):
     if not course.exercises:
         return
 
-    exerciseDir =  os.path.join(BASE_DOWNLOAD_PATH, clean_dir_name(course.name), "Exercise")
+    exerciseDir = os.path.join(course.path, "Exercises")
 
     if not os.path.exists(exerciseDir):
         os.makedirs(exerciseDir)
@@ -149,8 +178,10 @@ async def fetch_exercise(course: Course):
             await download_file(exercise.url, exerciseFilename)
             logging.info(f'----Downloaded Exercise {exerciseFilename}!')
 
+
 async def fetch_chapters(course: Course):
-    chapters_dirs = [chapter_dir(course, chapter) for chapter in course.chapters]
+    chapters_dirs = [chapter_dir(course, chapter)
+                     for chapter in course.chapters]
 
     # Creating all missing directories
     missing_directories = filterfalse(os.path.exists, chapters_dirs)
@@ -168,15 +199,19 @@ def fetch_chapter(course: Course, chapter: Chapter):
 
 
 async def fetch_video(course: Course, chapter: Chapter, video: Video):
-    subtitles_filename = os.path.splitext(video.filename)[0] + FILE_TYPE_SUBTITLE
-    video_file_path = os.path.join(chapter_dir(course, chapter), video.filename)
-    subtitle_file_path = os.path.join(chapter_dir(course, chapter), subtitles_filename)
+    subtitles_filename = os.path.splitext(
+        video.filename)[0] + FILE_TYPE_SUBTITLE
+    video_file_path = os.path.join(
+        chapter_dir(course, chapter), video.filename)
+    subtitle_file_path = os.path.join(
+        chapter_dir(course, chapter), subtitles_filename)
     video_exists = os.path.exists(video_file_path)
     subtitle_exists = os.path.exists(subtitle_file_path)
     if video_exists and subtitle_exists:
         return
 
-    logging.info(f"[~] Fetching course '{course.name}' Chapter no. {chapter.index} Video no. {video.index}")
+    logging.info(
+        f"[~] Fetching course '{course.name}' Chapter no. {chapter.index} Video no. {video.index}")
     async with aiohttp.ClientSession(headers=HEADERS, cookie_jar=COOKIE_JAR) as session:
         video_url = f'{URL}/learning-api/detailedCourses?addParagraphsToTranscript=false&courseSlug={course.slug}&' \
                     f'q=slugs&resolution=_720&videoSlug={video.slug}'
@@ -193,7 +228,8 @@ async def fetch_video(course: Course, chapter: Chapter, video: Video):
 
         video_url = data['elements'][0]['selectedVideo']['url']['progressiveUrl']
         subtitles = data['elements'][0]['selectedVideo']['transcript']['lines']
-        duration_in_ms = int(data['elements'][0]['selectedVideo']['durationInSeconds']) * 1000
+        duration_in_ms = int(
+            data['elements'][0]['selectedVideo']['durationInSeconds']) * 1000
 
         if not video_exists:
             logging.info(f'----Downloading {video_url} to {video_file_path}')
@@ -203,21 +239,30 @@ async def fetch_video(course: Course, chapter: Chapter, video: Video):
 
         await write_subtitles(subtitles, subtitle_file_path, duration_in_ms)
 
-    logging.info(f"[~] Done fetching course '{course.name}' Chapter no. {chapter.index} Video no. {video.index}")
+    logging.info(
+        f"[~] Done fetching course '{course.name}' Chapter no. {chapter.index} Video no. {video.index}")
 
 
 async def write_subtitles(subs, output_path, video_duration):
     def subs_to_lines(idx, sub):
         starts_at = sub['transcriptStartAt']
-        ends_at = subs[idx]['transcriptStartAt'] if idx < len(subs) else video_duration
+        ends_at = subs[idx]['transcriptStartAt'] if idx < len(
+            subs) else video_duration
         caption = sub['caption']
         return f"{idx}\n" \
                f"{sub_format_time(starts_at)} --> {sub_format_time(ends_at)}\n" \
                f"{caption}\n\n"
 
-    with open(output_path, 'wb') as f:
-        for line in starmap(subs_to_lines, enumerate(subs, start=1)):
-            f.write(line.encode('utf8'))
+    try:
+        with open(output_path, 'wb') as f:
+            for line in starmap(subs_to_lines, enumerate(subs, start=1)):
+                f.write(line.encode('utf8'))
+    except Exception as e:
+        logging.exception(
+            f"[!] Error while writting Subtitle [{len(subs)}]: '{e}'")
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        # return await write_subtitles(subs, output_path, video_duration)
 
 
 async def download_file(url, output):
@@ -231,9 +276,11 @@ async def download_file(url, output):
                             break
                         f.write(chunk)
             except Exception as e:
-                logging.exception(f"[!] Error while downloading {output}: '{e}'")
+                logging.exception(
+                    f"[!] Error while downloading {url}: '{e}'")
                 if os.path.exists(output):
                     os.remove(output)
+                # return download_file(url, output)
 
 
 async def process():
@@ -242,8 +289,8 @@ async def process():
         await login(USERNAME, PASSWORD)
         logging.info("[*] -------------Done-------------")
 
-        logging.info("[*] -------------Fetching Course-------------")
-        await fetch_courses()
+        logging.info("[*] -------------Fetching PATHS-------------")
+        await fetch_paths(PATHS)
         logging.info("[*] -------------Done-------------")
 
     except aiohttp.client_exceptions.ClientProxyConnectionError as e:

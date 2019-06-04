@@ -2,3 +2,5 @@
 __pycache__/
 downloads/
 config.py
+error-*.log
+test.py

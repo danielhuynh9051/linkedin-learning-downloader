@@ -10,10 +10,17 @@ from itertools import chain, filterfalse, starmap
 from collections import namedtuple
 from urllib.parse import urljoin
 from config import USERNAME, PASSWORD, MULTI_THREAD, PROXY, BASE_DOWNLOAD_PATH, PATHS
+from time import gmtime, strftime
 
 logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
+                    format='%(asctime)s %(name)s %(levelname)-8s %(message)s')
 
+errorLogger = logging.getLogger(__name__)
+# errorLogger.setLevel(errorLogger.error)
+handler = logging.FileHandler(f'error-{strftime("%Y-%m-%d", gmtime())}.log')
+# handler.setLevel(errorLogger.error)
+handler.setFormatter(logging.Formatter('%(asctime)s %(name)s %(levelname)-8s %(message)s'))
+errorLogger.addHandler(handler)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/66.0.3359.181 Safari/537.36",
@@ -89,32 +96,34 @@ def chapter_dir(course: Course, chapter: Chapter):
 
 async def login(username, password):
     async with aiohttp.ClientSession(headers=HEADERS, cookie_jar=COOKIE_JAR) as session:
-        logging.info("[*] Login step 1 - Getting CSRF token...")
-        resp = await session.get(URL, proxy=PROXY)
-        body = await resp.text()
+        try:
+            logging.info("[*] Login step 1 - Getting CSRF token...")
+            resp = await session.get(URL, proxy=PROXY)
+            body = await resp.text()
 
-        # Looking for CSRF Token
-        html = lxml.html.fromstring(body)
-        csrf = html.xpath("//input[@id='loginCsrfParam-login']/@value").pop()
-        logging.debug(f"[*] CSRF: {csrf}")
-        data = {
-            "session_key": username,
-            "session_password": password,
-            "loginCsrfParam": csrf,
-            "isJsEnabled": False
-        }
-        logging.info("[*] Login step 1 - Done")
-        logging.info("[*] Login step 2 - Logging In...")
-        await session.post(urljoin(URL, 'uas/login-submit'), proxy=PROXY, data=data)
+            # Looking for CSRF Token
+            html = lxml.html.fromstring(body)
+            csrf = html.xpath("//input[@id='loginCsrfParam-login']/@value").pop()
+            logging.debug(f"[*] CSRF: {csrf}")
+            data = {
+                "session_key": username,
+                "session_password": password,
+                "loginCsrfParam": csrf,
+                "isJsEnabled": False
+            }
+            logging.info("[*] Login step 1 - Done")
+            logging.info("[*] Login step 2 - Logging In...")
+            await session.post(urljoin(URL, 'uas/login-submit'), proxy=PROXY, data=data)
 
-        if not next((x.value for x in session.cookie_jar if x.key.lower() == 'li_at'), False):
-            raise RuntimeError(
-                "[!] Could not login. Please check your credentials")
+            if not next((x.value for x in session.cookie_jar if x.key.lower() == 'li_at'), False):
+                raise RuntimeError(
+                    "[!] Could not login. Please check your credentials")
 
-        HEADERS['Csrf-Token'] = next(
-            x.value for x in session.cookie_jar if x.key.lower() == 'jsessionid')
-        logging.info("[*] Login step 2 - Done")
-
+            HEADERS['Csrf-Token'] = next(
+                x.value for x in session.cookie_jar if x.key.lower() == 'jsessionid')
+            logging.info("[*] Login step 2 - Done")
+        except Exception as e:
+            errorLogger.exception(f"[!] Error while login: '{e}'")
 
 async def fetch_paths(paths):
     for path in paths:
@@ -137,27 +146,29 @@ async def fetch_course(course_slug, index, pathName=None):
         f"[*] -------------Fetching COURSE [{course_slug}]-------------")
     url = f"{URL}/learning-api/detailedCourses??fields=fullCourseUnlocked,releasedOn,exerciseFileUrls,exerciseFiles&addParagraphsToTranscript=true&courseSlug={course_slug}&q=slugs"
 
-    async with aiohttp.ClientSession(headers=HEADERS, cookie_jar=COOKIE_JAR) as session:
-        resp = await session.get(url, proxy=PROXY, headers=HEADERS)
-        data = await resp.json()
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS, cookie_jar=COOKIE_JAR) as session:
+            resp = await session.get(url, proxy=PROXY, headers=HEADERS)
+            data = await resp.json()
 
-        if pathName is None:
-            path = os.path.join(BASE_DOWNLOAD_PATH, clean_dir_name(data['elements'][0]['title']))
-        else:
-            data['elements'][0]['title'] = f"{str(index).zfill(2)} - {data['elements'][0]['title']}"
-            path = os.path.join(BASE_DOWNLOAD_PATH, clean_dir_name(
-                pathName), clean_dir_name(data['elements'][0]['title']))
+            if pathName is None:
+                path = os.path.join(BASE_DOWNLOAD_PATH, clean_dir_name(data['elements'][0]['title']))
+            else:
+                data['elements'][0]['title'] = f"{str(index).zfill(2)} - {data['elements'][0]['title']}"
+                path = os.path.join(BASE_DOWNLOAD_PATH, clean_dir_name(
+                    pathName), clean_dir_name(data['elements'][0]['title']))
 
-        course = build_course(data['elements'][0], path)
-        logging.info(
-            f'[*] Access to {course.name} is {"GRANTED" if course.unlocked else "DENIED"}')
-        # if not course.unlocked:
-        #     # Nothing to do here
-        #     return
-        await fetch_exercise(course)
-        await fetch_chapters(course)
-        logging.info(f'[*] Finished  fetching course "{course.name}"')
-
+            course = build_course(data['elements'][0], path)
+            logging.info(
+                f'[*] Access to {course.name} is {"GRANTED" if course.unlocked else "DENIED"}')
+            # if not course.unlocked:
+            #     # Nothing to do here
+            #     return
+            await fetch_exercise(course)
+            await fetch_chapters(course)
+            logging.info(f'[*] Finished  fetching course "{course.name}"')
+    except Exception as e:
+        errorLogger.exception(f"[!] Error while fetching course [{course_slug}]: '{e}'")
 
 async def fetch_exercise(course: Course):
     logging.info(f'Fetching Exercises...')
@@ -207,38 +218,41 @@ async def fetch_video(course: Course, chapter: Chapter, video: Video):
         chapter_dir(course, chapter), subtitles_filename)
     video_exists = os.path.exists(video_file_path)
     subtitle_exists = os.path.exists(subtitle_file_path)
+
     if video_exists and subtitle_exists:
         return
 
     logging.info(
         f"[~] Fetching course '{course.name}' Chapter no. {chapter.index} Video no. {video.index}")
-    async with aiohttp.ClientSession(headers=HEADERS, cookie_jar=COOKIE_JAR) as session:
-        video_url = f'{URL}/learning-api/detailedCourses?addParagraphsToTranscript=false&courseSlug={course.slug}&' \
-                    f'q=slugs&resolution=_720&videoSlug={video.slug}'
-        data = None
-        tries = 3
-        for _ in range(tries):
-            try:
-                resp = await session.get(video_url, proxy=PROXY, headers=HEADERS)
-                data = await resp.json()
-                resp.raise_for_status()
-                break
-            except aiohttp.client_exceptions.ClientResponseError:
-                pass
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS, cookie_jar=COOKIE_JAR) as session:
+            video_url = f'{URL}/learning-api/detailedCourses?addParagraphsToTranscript=false&courseSlug={course.slug}&' \
+                        f'q=slugs&resolution=_720&videoSlug={video.slug}'
+            data = None
+            tries = 3
+            for _ in range(tries):
+                try:
+                    resp = await session.get(video_url, proxy=PROXY, headers=HEADERS)
+                    data = await resp.json()
+                    resp.raise_for_status()
+                    break
+                except aiohttp.client_exceptions.ClientResponseError:
+                    pass
 
-        video_url = data['elements'][0]['selectedVideo']['url']['progressiveUrl']
-        subtitles = data['elements'][0]['selectedVideo']['transcript']['lines']
-        duration_in_ms = int(
-            data['elements'][0]['selectedVideo']['durationInSeconds']) * 1000
+            video_url = data['elements'][0]['selectedVideo']['url']['progressiveUrl']
+            subtitles = data['elements'][0]['selectedVideo']['transcript']['lines']
+            duration_in_ms = int(
+                data['elements'][0]['selectedVideo']['durationInSeconds']) * 1000
 
-        if not video_exists:
-            logging.info(f'----Downloading {video_url} to {video_file_path}')
-            await download_file(video_url, video_file_path)
-        else:
-            logging.info(f'--Video {video_file_path} existed!')
+            if not video_exists:
+                logging.info(f'----Downloading {video_url} to {video_file_path}')
+                await download_file(video_url, video_file_path)
+            else:
+                logging.info(f'--Video {video_file_path} existed!')
 
-        await write_subtitles(subtitles, subtitle_file_path, duration_in_ms)
-
+            await write_subtitles(subtitles, subtitle_file_path, duration_in_ms)
+    except Exception as e:
+        errorLogger.exception(f"[!] Error while fetching video [{video.slug}] in [{course.slug}]: '{e}'")
     logging.info(
         f"[~] Done fetching course '{course.name}' Chapter no. {chapter.index} Video no. {video.index}")
 
@@ -258,8 +272,8 @@ async def write_subtitles(subs, output_path, video_duration):
             for line in starmap(subs_to_lines, enumerate(subs, start=1)):
                 f.write(line.encode('utf8'))
     except Exception as e:
-        logging.exception(
-            f"[!] Error while writting Subtitle [{len(subs)}]: '{e}'")
+        errorLogger.exception(
+            f"[!] Error while writting Subtitle [{output_path}]: '{e}'")
         if os.path.exists(output_path):
             os.remove(output_path)
         # return await write_subtitles(subs, output_path, video_duration)
@@ -276,8 +290,8 @@ async def download_file(url, output):
                             break
                         f.write(chunk)
             except Exception as e:
-                logging.exception(
-                    f"[!] Error while downloading {url}: '{e}'")
+                errorLogger.exception(
+                    f"[!] Error while downloading [{url}]: '{e}'")
                 if os.path.exists(output):
                     os.remove(output)
                 # return download_file(url, output)
@@ -294,10 +308,10 @@ async def process():
         logging.info("[*] -------------Done-------------")
 
     except aiohttp.client_exceptions.ClientProxyConnectionError as e:
-        logging.error(f"Proxy Error: {e}")
+        errorLogger.error(f"Proxy Error: {e}")
 
     except aiohttp.client_exceptions.ClientConnectionError as e:
-        logging.error(f"Connection Error: {e}")
+        errorLogger.error(f"Connection Error: {e}")
 
 
 if __name__ == "__main__":
